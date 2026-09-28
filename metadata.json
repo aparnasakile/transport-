@@ -1,0 +1,6 @@
+{
+  "name": "TripGo - Trip Planning & Transportation Booking",
+  "description": "All-in-one travel platform to search, compare, and book buses, trains, flights, cabs, and rental cars, with interactive seat selection, trip planning, timetable, budget calculator, and digital tickets.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
