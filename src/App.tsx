@@ -21,6 +21,7 @@ import { SeatSelectionModal } from './components/SeatSelectionModal.tsx';
 import { BookingCheckoutModal } from './components/BookingCheckoutModal.tsx';
 import { DigitalTicketModal } from './components/DigitalTicketModal.tsx';
 import { ExtraToolsModal } from './components/ExtraToolsModal.tsx';
+import { ChatbotWidget } from './components/ChatbotWidget.tsx';
 import { Footer } from './components/Footer.tsx';
 
 const AppContent: React.FC = () => {
@@ -68,6 +69,9 @@ const AppContent: React.FC = () => {
       <BookingCheckoutModal />
       <DigitalTicketModal />
       <ExtraToolsModal />
+
+      {/* AI Travel Assistant Chatbot */}
+      <ChatbotWidget />
 
       {/* Footer */}
       <Footer />

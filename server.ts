@@ -1,6 +1,7 @@
 import express, { Request, Response } from 'express';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import { GoogleGenAI } from '@google/genai';
 import {
   SAMPLE_BUSES,
   POPULAR_DESTINATIONS,
@@ -78,6 +79,46 @@ let notificationsState: NotificationItem[] = [
 ];
 
 let reviewsState: UserReview[] = [...SAMPLE_REVIEWS];
+
+// n8n Cloud Workflow & Webhook Integration State
+interface N8nConfig {
+  workflowUrl: string;
+  webhookUrl: string;
+  enabled: boolean;
+  lastDispatchedAt?: string;
+  lastStatus?: string;
+}
+
+let n8nConfigState: N8nConfig = {
+  workflowUrl: 'https://aparna2007.app.n8n.cloud/workflow/3RYEQh9b0QP3I1yB?projectId=SFPp4mx1CCaHHzIB',
+  webhookUrl: 'https://aparna2007.app.n8n.cloud/webhook/tripgo-events',
+  enabled: true,
+  lastDispatchedAt: undefined,
+  lastStatus: 'Configured & Ready'
+};
+
+async function dispatchToN8n(event: string, data: any) {
+  if (!n8nConfigState.enabled || !n8nConfigState.webhookUrl) return;
+  try {
+    const payload = {
+      event,
+      timestamp: new Date().toISOString(),
+      source: 'TripGo Travel Platform',
+      workflowRef: n8nConfigState.workflowUrl,
+      data
+    };
+    const response = await fetch(n8nConfigState.webhookUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    });
+    n8nConfigState.lastDispatchedAt = new Date().toISOString();
+    n8nConfigState.lastStatus = `HTTP ${response.status} (${response.ok ? 'Delivered' : 'Failed'})`;
+  } catch (error: any) {
+    n8nConfigState.lastDispatchedAt = new Date().toISOString();
+    n8nConfigState.lastStatus = `Delivery error: ${error.message || 'Network error'}`;
+  }
+}
 
 // --- REST API ENDPOINTS ---
 
@@ -240,6 +281,9 @@ app.post('/api/bookings', (req: Request, res: Response) => {
 
   bookingsState.unshift(newBooking);
 
+  // Dispatch live event to connected n8n workflow
+  dispatchToN8n('booking.confirmed', newBooking);
+
   // Add confirmation notification
   notificationsState.unshift({
     id: `notif-${Date.now()}`,
@@ -282,6 +326,14 @@ app.post('/api/bookings/:id/cancel', (req: Request, res: Response) => {
 
   booking.bookingStatus = 'cancelled';
   booking.paymentStatus = 'refunded';
+
+  // Dispatch cancellation to n8n
+  dispatchToN8n('booking.cancelled', {
+    bookingId: booking.id,
+    refundAmount,
+    refundPercentage,
+    booking
+  });
 
   // Free up the seats
   if (bus) {
@@ -599,6 +651,188 @@ app.post('/api/admin/buses', (req: Request, res: Response) => {
 app.delete('/api/admin/buses/:id', (req: Request, res: Response) => {
   busesState = busesState.filter(b => b.id !== req.params.id);
   res.json({ success: true, message: 'Bus removed' });
+});
+
+// 16. n8n Cloud Integration Endpoints
+app.get('/api/integrations/n8n', (_req: Request, res: Response) => {
+  res.json(n8nConfigState);
+});
+
+app.post('/api/integrations/n8n', (req: Request, res: Response) => {
+  const { workflowUrl, webhookUrl, enabled } = req.body;
+  if (workflowUrl !== undefined) n8nConfigState.workflowUrl = workflowUrl;
+  if (webhookUrl !== undefined) n8nConfigState.webhookUrl = webhookUrl;
+  if (enabled !== undefined) n8nConfigState.enabled = Boolean(enabled);
+  res.json({ success: true, config: n8nConfigState });
+});
+
+app.post('/api/integrations/n8n/test', async (req: Request, res: Response) => {
+  const targetUrl = req.body.webhookUrl || n8nConfigState.webhookUrl;
+  const samplePayload = {
+    event: 'booking.confirmed',
+    timestamp: new Date().toISOString(),
+    source: 'TripGo Travel Platform',
+    workflowRef: n8nConfigState.workflowUrl,
+    data: {
+      id: 'TG-BK-SAMPLE-77',
+      tripType: 'one-way',
+      busOperator: 'IntrCity SmartBus Premium',
+      busNumber: 'TG-7782-LX',
+      source: 'Delhi',
+      destination: 'Manali',
+      departureDate: '2026-10-05',
+      departureTime: '19:30',
+      arrivalTime: '08:30',
+      duration: '13h 00m',
+      selectedSeatNumbers: ['L1A', 'L1B'],
+      passengers: [
+        { name: 'Aparna Sakile', age: 28, gender: 'female', seatNumber: 'L1A' },
+        { name: 'Rahul Sharma', age: 30, gender: 'male', seatNumber: 'L1B' }
+      ],
+      contactEmail: 'aparnasakile@gmail.com',
+      contactPhone: '+91 9876543210',
+      baseFare: 2598,
+      taxAmount: 130,
+      serviceFee: 50,
+      discountAmount: 250,
+      totalAmount: 2528,
+      paymentMethod: 'upi',
+      paymentStatus: 'paid',
+      bookingStatus: 'confirmed',
+      couponCode: 'TRIPGOFIRST'
+    }
+  };
+
+  try {
+    const fetchResponse = await fetch(targetUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(samplePayload)
+    });
+
+    const statusText = `HTTP ${fetchResponse.status} ${fetchResponse.statusText}`;
+    n8nConfigState.lastDispatchedAt = new Date().toISOString();
+    n8nConfigState.lastStatus = statusText;
+
+    let responseBody = '';
+    try {
+      responseBody = await fetchResponse.text();
+    } catch {
+      responseBody = '';
+    }
+
+    res.json({
+      success: fetchResponse.ok,
+      status: fetchResponse.status,
+      statusText: fetchResponse.statusText,
+      deliveredTo: targetUrl,
+      responseBody: responseBody.slice(0, 500),
+      payloadSent: samplePayload
+    });
+  } catch (err: any) {
+    n8nConfigState.lastDispatchedAt = new Date().toISOString();
+    n8nConfigState.lastStatus = `Connection Error: ${err.message}`;
+
+    res.status(502).json({
+      success: false,
+      error: err.message || 'Could not connect to n8n webhook URL',
+      hint: 'Make sure your Webhook node in n8n is activated (Listen for test event or Production active).',
+      payloadSent: samplePayload
+    });
+  }
+});
+
+// 17. AI Travel Assistant Chatbot Endpoint
+app.post('/api/chat', async (req: Request, res: Response) => {
+  const { message, history } = req.body;
+  if (!message || typeof message !== 'string') {
+    return res.status(400).json({ error: 'Message text is required' });
+  }
+
+  const systemInstruction = `You are "TripGo AI Assistant", the official intelligent travel concierge for TripGo (deployed at https://transport-seven-sable.vercel.app).
+TripGo enables travelers to search, compare, and book buses, trains, flights, cabs, and rental cars, plan day-by-day itineraries, and check live timetables.
+
+Key Platform Knowledge:
+- Production App URL: https://transport-seven-sable.vercel.app
+- Connected n8n Workflow: https://aparna2007.app.n8n.cloud/workflow/3RYEQh9b0QP3I1yB?projectId=SFPp4mx1CCaHHzIB
+- Available Bus Routes:
+  * Delhi ⇄ Manali (Volvo Sleeper 19:30 ₹1,299 / Zingbus 20:45 ₹949, 13h)
+  * Mumbai ⇄ Goa (VRL Mercedes Benz Sleeper 18:00 ₹1,450, 13h 30m)
+  * Bangalore ⇄ Goa (Orange Travels Volvo Sleeper 21:00 ₹1,150, 11h 45m)
+  * Delhi ⇄ Jaipur (RSRTC Superfast AC Seater 06:00 ₹520, 5h 15m)
+  * Delhi ⇄ Agra (Greenline Electric Zero-Emission AC Seater 07:30 ₹420, 3h 15m)
+- Verified Coupons:
+  * TRIPGOFIRST: 15% off up to ₹250 on first booking
+  * WEEKEND150: Flat ₹150 off for travel on Friday, Saturday, or Sunday
+  * FESTIVE25: 20% off up to ₹500 for groups of 2+ seats
+- Cancellation Policy: 80% to 100% refund processed within 2-4 hours if cancelled 6-12+ hours prior.
+- Local Commutes: Auto (₹35 base + ₹14/km), Prime Cab (₹90 base + ₹18/km), Scooter Rental (₹350/day), Metro (₹20).
+- Emergency numbers: 112 (National Unified Helpline), 1800-420-TRIP (TripGo Roadside).
+
+Provide clear, helpful, and concise responses formatted in markdown with bullet points and emojis. When giving recommendations, invite the traveler to explore or book on https://transport-seven-sable.vercel.app.`;
+
+  try {
+    if (process.env.GEMINI_API_KEY) {
+      const ai = new GoogleGenAI({});
+      const contents: any[] = [];
+      if (Array.isArray(history)) {
+        history.slice(-6).forEach((h: any) => {
+          contents.push({
+            role: h.role === 'user' ? 'user' : 'model',
+            parts: [{ text: h.text || h.content || '' }]
+          });
+        });
+      }
+      contents.push({
+        role: 'user',
+        parts: [{ text: message }]
+      });
+
+      const timeoutPromise = new Promise((_, reject) =>
+        setTimeout(() => reject(new Error('AI call timeout')), 3500)
+      );
+      const aiPromise = ai.models.generateContent({
+        model: 'gemini-3.8-flash',
+        contents,
+        config: {
+          systemInstruction,
+          temperature: 0.7,
+        }
+      });
+
+      const response: any = await Promise.race([aiPromise, timeoutPromise]);
+
+      return res.json({
+        reply: response.text || "I'm here to help you plan your journey on TripGo!",
+        source: 'gemini-3.8-flash',
+        liveAppUrl: 'https://transport-seven-sable.vercel.app'
+      });
+    }
+  } catch (err: any) {
+    console.error('Gemini API chat error:', err?.message || err);
+  }
+
+  // Fallback intelligent domain logic
+  const lowerMsg = message.toLowerCase();
+  let reply = `Hello! I'm your **TripGo Assistant** for [transport-seven-sable.vercel.app](https://transport-seven-sable.vercel.app).\n\nHere are some things I can help you with:\n• 🚌 **Bus Search**: Direct routes for Delhi, Manali, Goa, Mumbai, Jaipur, and Bangalore.\n• 🎟️ **Promo Coupons**: Use code \`TRIPGOFIRST\` for 15% off or \`WEEKEND150\` for flat ₹150 off.\n• 🗺️ **Trip Planner**: Get custom day-by-day itineraries with attractions and cafes.\n• ⚡ **n8n Automation**: Your booking events can automatically sync to your n8n workflow!`;
+
+  if (lowerMsg.includes('delhi') && lowerMsg.includes('manali')) {
+    reply = `🚌 **Delhi ➔ Manali Bus Options on TripGo:**\n\n1. **IntrCity SmartBus Premium** (Volvo 9600 AC Sleeper)\n   • Departs: 19:30 from ISBT Kashmiri Gate | Arrives: 08:30 (13h)\n   • Fare: ₹1,299 | Rating: 4.8 ⭐ | Amenities: WiFi, Blanket, Water\n\n2. **Zingbus Express Lounge** (Scania AC Semi-Sleeper)\n   • Departs: 20:45 from Akshardham | Arrives: 09:45 (13h)\n   • Fare: ₹949 | Rating: 4.6 ⭐ | Amenities: Leg rest, Live GPS\n\n👉 You can select seats and book directly on [transport-seven-sable.vercel.app](https://transport-seven-sable.vercel.app).`;
+  } else if (lowerMsg.includes('coupon') || lowerMsg.includes('discount') || lowerMsg.includes('offer')) {
+    reply = `🎟️ **Active Promo Coupons on TripGo:**\n\n• **\`TRIPGOFIRST\`**: 15% OFF up to ₹250 on your first booking.\n• **\`WEEKEND150\`**: Flat ₹150 OFF for travel on Fri, Sat, or Sun.\n• **\`FESTIVE25\`**: 20% OFF up to ₹500 for groups of 2+ seats.\n\n*Apply these codes during checkout on [transport-seven-sable.vercel.app](https://transport-seven-sable.vercel.app) for instant savings!*`;
+  } else if (lowerMsg.includes('goa')) {
+    reply = `🏖️ **Traveling to Goa?**\n\n• **Buses from Mumbai**: VRL Travels Mercedes Benz Sleeper (18:00 - 07:30) from ₹1,450.\n• **Buses from Bangalore**: Orange Travels Volvo Sleeper (21:00 - 08:45) from ₹1,150.\n• **Recommended Hotel**: Baywatch Coastal Palms Resort (Calangute, North Goa) from ₹4,100/night.\n• **Local Transit**: Self-drive scooter rentals available at ₹350/day.`;
+  } else if (lowerMsg.includes('n8n') || lowerMsg.includes('workflow')) {
+    reply = `⚡ **n8n Workflow Integration Status:**\n\nYour n8n workflow at [aparna2007.app.n8n.cloud/workflow/3RYEQh9b0QP3I1yB](https://aparna2007.app.n8n.cloud/workflow/3RYEQh9b0QP3I1yB?projectId=SFPp4mx1CCaHHzIB) is integrated!\n\nEvery booking, cancellation, and trip plan event on [transport-seven-sable.vercel.app](https://transport-seven-sable.vercel.app) automatically triggers your n8n webhook.`;
+  } else if (lowerMsg.includes('cancel') || lowerMsg.includes('refund')) {
+    reply = `🛡️ **TripGo Cancellation & Refund Policy:**\n\n• **12+ hours prior**: 80% to 100% refund guaranteed.\n• **6 to 12 hours prior**: 50% to 80% refund depending on operator.\n• **Auto-Refund turnaround**: Credits back to your UPI/Card within 2 to 4 hours.\n\nYou can manage and cancel any ticket directly in the **My Trips** tab on [transport-seven-sable.vercel.app](https://transport-seven-sable.vercel.app).`;
+  }
+
+  res.json({
+    reply,
+    source: 'knowledge-base',
+    liveAppUrl: 'https://transport-seven-sable.vercel.app'
+  });
 });
 
 // --- VITE MIDDLEWARE IN DEV OR STATIC IN PROD ---
